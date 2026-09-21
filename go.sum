@@ -1,0 +1,4 @@
+github.com/hdm/jarm-go v0.0.8 h1:8yDIGrmhEJs+QW1voR3JU0Zaz+AUqs3CJzMAQKzGFIc=
+github.com/hdm/jarm-go v0.0.8/go.mod h1:memdt/YMMW3811nvANDJsrtc8Fy2e1685aDWdI7Gwto=
+golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
+golang.org/x/net v0.59.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
