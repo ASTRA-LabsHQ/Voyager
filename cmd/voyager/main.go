@@ -1,7 +1,9 @@
-// Command voyager finds and fingerprints suspected C2 infrastructure.
+// Command voyager finds and fingerprints suspected C2 infrastructure, and
+// extracts candidate IOCs from analyzed malware samples.
 //
-// Two subcommands:
+// Subcommands:
 //
+//	voyager extract   — pull candidate IOCs (IPs/domains/URLs) out of a sample's strings
 //	voyager discover  — find candidate hosts via Shodan (new hosts, not yet verified)
 //	voyager scan      — fingerprint one already-known host:port directly
 package main
@@ -18,6 +20,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "extract":
+		runExtract(os.Args[2:])
 	case "discover":
 		runDiscover(os.Args[2:])
 	case "scan":
@@ -35,6 +39,7 @@ func topLevelUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: voyager <command> [flags]
 
 Commands:
+  extract    pull candidate IOCs out of a malware sample's strings
   discover   find candidate C2 hosts across the internet via Shodan
   scan       fingerprint one known host:port directly (through Tor)
 

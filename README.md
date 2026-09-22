@@ -1,158 +1,162 @@
 # ASTRA Voyager
 
-A C2 infrastructure hunter. Voyager fingerprints suspected command-and-control
-listeners on the internet using network-level artifacts (TLS fingerprints,
-banners, favicons, and more as modules are added), enriches confirmed
-infrastructure with free OSINT sources, and publishes the results as an
-intelligence feed.
-
-Probing goes through Tor by default, so contact with adversary infrastructure
-isn't tied back to the research machine's own IP.
+Extracts candidate IOCs (IPs, domains, URLs) from malware samples ASTRA has
+analyzed, feeding the [Feed](https://astra-labs.co/feed.html) page on the
+ASTRA site. Originally the project explored hunting C2 infrastructure
+directly (Shodan-based discovery + Tor-based fingerprinting) — that code is
+still here and working, but the primary focus is now sample-driven: pull
+IOCs out of the binaries behind ASTRA's own write-ups, rather than trying to
+discover infrastructure nobody's analyzed yet.
 
 ## Status
 
-Early and under active development. What exists right now:
+- **`extract`** — the main tool. Pulls candidate network IOCs out of a
+  sample's strings (ASCII and UTF-16LE), classifies IPs, and outputs
+  ready-to-paste markdown matching ASTRA's write-up format.
+- **`discover` / `scan`** — from the earlier C2-infrastructure-hunting
+  exploration. `discover` finds candidate hosts via Shodan's `product`/`tag`
+  classifications or JARM hashes; `scan` fingerprints one known host
+  through Tor. Both still work, kept as a secondary capability rather than
+  the project's main direction. See [C2 discovery/scanning](#c2-discoveryscanning-secondary)
+  below.
 
-- **Tor transport** — dials targets through a local Tor SOCKS5 proxy
-- **JARM fingerprinting** — active TLS fingerprinting, checked against a
-  sourced database of known C2/red-team framework hashes (Cobalt Strike,
-  Metasploit, Sliver, Mythic, Merlin, Covenant, and more)
-- **Discovery via Shodan** — finds *new* candidate hosts by searching Shodan
-  for known fingerprints, rather than scanning the internet directly (see
-  [How discovery works](#how-discovery-works) for why)
-- **Scan** — fingerprints one already-known `host:port` directly, through Tor
+Not built yet: per-family malware config parsers (structured extraction
+beyond raw strings — see [How malware analysts do this
+elsewhere](#how-other-people-do-this)), aggregation of write-ups' IOC
+sections into the actual MISP feed, and a YARA rule library on the site.
 
-Not built yet: additional fingerprint modules (favicon hashing, TLS
-cert/JA3S), a Censys discoverer, enrichment integrations (urlscan, GreyNoise,
-etc.), confidence scoring across multiple signals, and the MISP feed output.
-See [Roadmap](#roadmap).
-
-## Usage
-
-Requires a local Tor daemon for `scan` (`brew install tor && tor` on macOS,
-or `brew services start tor` to run it persistently) and a Shodan API key
-for `discover`.
-
-**Shodan tier matters:** a bare free-signup API key can't use search filters
-at all (`ssl.jarm:`, `http.favicon.hash:`, etc. all require at least the
-one-time $49 "Membership" tier — see [Shodan's pricing
-page](https://developer.shodan.io/pricing)). `discover` will fail on every
-query with a free-tier key.
-
-### discover — find new candidate hosts
+## extract — pull IOCs out of a sample
 
 ```bash
-export SHODAN_API_KEY=your-key-here
-
-# by framework name (looks up every known JARM hash for it)
-go run ./cmd/voyager discover -framework "Cobalt Strike"
-
-# by a specific JARM hash
-go run ./cmd/voyager discover -jarm 07d14d16d21d21d07c42d41d00041d24a458a375eef0c576d23a7bab9a9fb1
-
-# or a raw Shodan query
-go run ./cmd/voyager discover -query 'ssl.jarm:"07d14d..." country:US'
+go run ./cmd/voyager extract <sample-path>
 ```
 
 ```
-Usage: voyager discover [flags]
+Usage: voyager extract [flags] <sample-path>
 
-  -framework string
-        C2 framework name to search for, e.g. "Cobalt Strike"
-  -jarm string
-        raw JARM hash to search Shodan for
-  -query string
-        raw Shodan search query, overrides -jarm/-framework
-  -limit int
-        max candidates to return per query (default 100)
-  -shodan-key string
-        Shodan API key (default: $SHODAN_API_KEY)
-```
-
-Output is a list of unverified `ip:port` candidates — leads, not confirmed
-C2. Cross-check with `scan` (or a future automated verify step) before
-treating any of them as live.
-
-### scan — fingerprint one known target
-
-```bash
-go run ./cmd/voyager scan <host:port>
-```
-
-```
-Usage: voyager scan [flags] <host:port>
-
-  -no-tor
-        dial the target directly instead of through Tor (lab/testing use only)
-  -timeout duration
-        per-probe network timeout (default 5s)
-  -tor-addr string
-        address of the local Tor SOCKS5 proxy (default "127.0.0.1:9050")
+  -format string
+        output format: text, markdown, json (default "text")
+  -min-len int
+        minimum string length to consider (default 5)
 ```
 
 Example:
 
 ```bash
-$ go run ./cmd/voyager scan 45.33.32.156:443
-[*] running jarm against 45.33.32.156:443
-    MATCH  framework="Cobalt Strike" indicator=JARM value=07d14d16d21d21d07c42d41d00041d24a458a375eef0c576d23a7bab9a9fb1
-           source=cedowens/C2-JARM
-           note=JARM fingerprints the TLS stack, not the application — corroborate before treating this as confirmed C2.
+$ go run ./cmd/voyager extract -format markdown suspicious.exe
+## Indicators of Compromise
+
+- update-server.evil-actor[.]top
+- http[:]//malicious-c2-panel[.]top/gate.php
+- 198[.]51[.]100[.]23
 ```
 
-A "no known-C2 match" result still prints the raw computed fingerprint, so it
-can be logged or cross-referenced manually even without a hit.
+The `markdown` format defangs output the same way ASTRA's existing
+write-ups do (see `malware/acelauncher.txt`): `://` becomes `[:]//`, and
+only the last dot in a host — the one separating domain from TLD — gets
+bracketed, not every dot.
 
-## How discovery works
+**These are candidates, not confirmed indicators.** Extracting strings from
+a binary pulls in real noise — library URLs, XML namespaces, version
+strings that happen to look like a domain. Domain matches are filtered
+against a common-TLD allowlist to cut the most obvious noise, but review
+the output before pasting it into a write-up. Only ever run this against
+samples in an isolated analysis environment.
 
-Voyager does not, and will not, scan the internet itself. Scanning the full
-IPv4 space through Tor isn't practical (10-probe JARM handshakes with
-multi-second Tor circuit latency, times ~4 billion addresses) and mass
-scanning through Tor exit nodes runs against Tor's own usage norms. Doing
-your own internet-wide scan the way Shodan/Censys do requires dedicated,
-disclosed scanning infrastructure most researchers don't build themselves.
+### Why UTF-16LE matters
 
-Instead, `discover` queries Shodan — which has already scanned the internet,
-legitimately and at scale — for hosts matching a known fingerprint. That
-turns "find new C2 infrastructure" into "search infrastructure someone else
-already indexed," which is both the practical and the responsible way to do
-this.
+Plain `strings` (and naive ASCII-only extraction) misses wide-character
+strings entirely. Windows binaries — loaders and droppers especially —
+frequently store strings, including C2 URLs, as UTF-16LE. `extract` scans
+for both.
 
-## How detection works
+## How other people do this
 
-JARM sends 10 specially-crafted TLS Client Hello probes and hashes the
-server's responses — different TLS stacks/libraries answer differently, so
-the resulting hash is a strong signal for identifying the *software* behind a
-listener, independent of IP or domain reputation.
+For IOCs sitting in a plainly-readable string, `extract` is enough. Many
+malware families instead encrypt or obfuscate their C2 config, which needs
+a per-family parser to recover. Worth reusing rather than reinventing when
+that's needed:
 
-**Important caveat:** JARM fingerprints the TLS stack, not the specific
-application. Multiple unrelated tools built on the same language runtime
-(e.g. Python + aiohttp) produce identical hashes — see
+- [CAPE sandbox](https://github.com/kevoreilly/CAPEv2) — per-family config
+  parsers as part of a full detonation sandbox
+- [malduck](https://github.com/CERT-Polska/malduck) — CERT.pl's
+  config-extraction library, usable standalone
+- [MalConfScan](https://github.com/JPCERTCC/MalConfScan) — JPCERT/CC's
+  Volatility plugin for memory-resident config extraction
+
+Other approaches to a malware-intel feed worth knowing about, roughly in
+order of fit for a single analyst:
+
+1. **Config extraction from samples you analyze** (what `extract` does)
+2. **Sandbox detonation** for live network IOCs when a config parser isn't
+   worth writing
+3. **YARA hunting** (VirusTotal Intelligence retrohunt, MalwareBazaar) to
+   find new samples of a tracked family at scale
+4. **Honeypots** (Cowrie, T-Pot) for genuinely original data — real
+   attacker IPs and dropped samples from traffic hitting your own
+   infrastructure
+5. **Aggregating existing free feeds** (abuse.ch's MalwareBazaar/URLhaus/ThreatFox)
+   with your own context/scoring added — needs clear attribution, not
+   presented as original discovery
+6. **Certificate transparency / newly-registered-domain monitoring** for
+   catching infrastructure before it's used
+
+## C2 discovery/scanning (secondary)
+
+Requires a local Tor daemon for `scan` (`brew install tor && tor`, or
+`brew services start tor` to run it persistently) and a Shodan API key for
+`discover`. A bare free-signup Shodan key can't use search filters at all —
+`ssl.jarm:`, `product:`, `tag:`, etc. all require at least the one-time $49
+"Membership" tier.
+
+```bash
+export SHODAN_API_KEY=your-key-here
+
+# Shodan's own crawler-side classification — much lower noise than JARM alone
+go run ./cmd/voyager discover -query 'product:"Cobalt Strike Beacon"'
+
+# by framework name (looks up every known JARM hash for it)
+go run ./cmd/voyager discover -framework "Cobalt Strike"
+
+# fingerprint one already-known target directly, through Tor
+go run ./cmd/voyager scan <host:port>
+```
+
+Full flag reference: `go run ./cmd/voyager discover -h` / `scan -h`.
+
+**Why this queries Shodan instead of scanning the internet itself:**
+scanning the full IPv4 space through Tor isn't practical (10-probe JARM
+handshakes with multi-second Tor circuit latency, times ~4 billion
+addresses), and mass scanning through Tor exit nodes runs against Tor's own
+usage norms. Doing your own internet-wide scan the way Shodan/Censys do
+requires dedicated, disclosed scanning infrastructure most researchers
+don't build themselves — so `discover` searches infrastructure someone else
+already indexed, legitimately and at scale, instead.
+
+**Why JARM alone isn't enough:** it fingerprints the TLS stack, not the
+application — unrelated tools on the same language runtime produce
+identical hashes (see
 [`internal/fingerprint/jarm_signatures.go`](internal/fingerprint/jarm_signatures.go)
-for documented collisions. A JARM hit is a candidate worth investigating
-further, never a standalone conclusion. This is why Voyager is being built
-to combine multiple independent signals before anything is published to the
-feed.
+for documented collisions). In practice, a real JARM query against
+Shodan returned thousands of hits dominated by ordinary mail servers.
+Shodan's own `product:`/`tag:` classification (it decodes and labels actual
+Cobalt Strike Beacon configs, for example) performed far better. JARM stays
+useful as a secondary, corroborating signal.
 
-Signature sources:
-- [salesforce/jarm](https://github.com/salesforce/jarm) — original JARM
-  research and reference Cobalt Strike/Metasploit/Merlin hashes
-- [cedowens/C2-JARM](https://github.com/cedowens/C2-JARM) — broader
-  community-maintained C2/red-team framework hash list
+Signature sources: [salesforce/jarm](https://github.com/salesforce/jarm)
+(original research) and [cedowens/C2-JARM](https://github.com/cedowens/C2-JARM)
+(broader community hash list). [C2-Tracker](https://github.com/montysecurity/C2-Tracker)
+is a maintained project doing Shodan-query-based C2 tracking across more
+frameworks, worth referencing for query syntax beyond Cobalt Strike.
 
 ## Roadmap
 
-- [ ] Additional fingerprint modules: favicon hashing (mmh3), TLS
-      certificate CN/issuer defaults, HTTP response fingerprints
-- [ ] Censys as a second Discoverer
-- [ ] Automated verify step: pipe `discover` candidates straight into `scan`
+- [ ] Per-family malware config parsers (structured extraction beyond raw strings)
+- [ ] Aggregate write-ups' `## Indicators of Compromise` sections into a
+      published MISP feed + YARA rule library on the site
+- [ ] Additional C2 fingerprint modules: favicon hashing, TLS cert/JA3S defaults
+- [ ] Censys as a second Discoverer; automated discover → scan verify step
 - [ ] Confidence scoring across multiple independent signals
-- [ ] Enrichment: urlscan.io, Shodan InternetDB, abuse.ch (ThreatFox/URLhaus),
-      crt.sh, GreyNoise Community API, RDAP/WHOIS
-- [ ] MISP feed output (manifest + per-event JSON), hosted as a static feed
-- [ ] Infrastructure clustering (ASN/cert/JARM reuse across IPs)
-- [ ] Passive DNS integration
-- [ ] Scheduled re-verification with `first_seen`/`last_seen` tracking
 
 ## Part of the ASTRA Labs Ecosystem
 
@@ -162,9 +166,9 @@ Signature sources:
 
 ## Disclaimer
 
-Voyager is a defensive research tool for identifying and tracking malicious
-infrastructure. Probing is intentionally passive/non-intrusive (TLS
-handshakes, banner/favicon fetches) — no exploitation, authentication
-attempts, or interaction beyond what's needed to fingerprint a listener. Use
-it within the scope of authorized research. ASTRA Labs is not responsible
+Voyager is a defensive research tool. Malware samples should only ever be
+handled in an isolated analysis environment. C2 probing (`scan`/`discover`)
+is intentionally passive/non-intrusive — no exploitation, authentication
+attempts, or interaction beyond what's needed to fingerprint a listener.
+Use within the scope of authorized research. ASTRA Labs is not responsible
 for misuse of this tool.
